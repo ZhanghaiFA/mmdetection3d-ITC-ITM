@@ -1,4 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+
+# 官方
+# python tools/create_data.py nuscenes --root-path /data/zhf/nuscenes --out-dir /data/zhf/nuscenes --extra-tag nuscenes
+
+
+
 import argparse
 from os import path as osp
 

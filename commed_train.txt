@@ -1,0 +1,6 @@
+
+lidar only
+
+bash tools/dist_train.py projects/BEVFusion/configs/bevfusion_lidar_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d.py 2
+
+bash tools/dist_train.sh projects/BEVFusion/configs/bevfusion_lidar-cam_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d.py 2 --cfg-options load_from=/home/zhf/mmdetection3d/pretrain/bevfusion_lidar_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d-2628f933.pth model.img_backbone.init_cfg.checkpoint=/home/zhf/mmdetection3d/pretrain/swint-nuimages-pretrained.pth
