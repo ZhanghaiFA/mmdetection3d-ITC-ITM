@@ -15,6 +15,20 @@ from mmdet3d.structures import Det3DDataSample
 from mmdet3d.utils import OptConfigType, OptMultiConfig, OptSampleList
 from .ops import Voxelization
 
+from .contrastive_utils import MatchingHead, ContrastiveHead
+
+import torch.nn as nn
+
+
+class DropChannel(nn.Module):
+    def __init__(self, p: float = 0.1):
+        super().__init__()
+        self.drop = nn.Dropout2d(p)
+
+    def forward(self, x):
+        # x: [B, C, H, W]
+        return self.drop(x)
+
 
 @MODELS.register_module()
 class BEVFusion(Base3DDetector):
@@ -61,6 +75,29 @@ class BEVFusion(Base3DDetector):
         self.bbox_head = MODELS.build(bbox_head)
 
         self.init_weights()
+
+        self.itm_pre_head = MatchingHead(
+            in_channels_img=80,      # LiDAR 全局池化后的维度
+            in_channels_lidar=256,
+            hidden=256,
+            use_projector=True,
+            proj_dim=256
+        )
+
+        # self.itc_post_head = ContrastiveHead(
+        #     in_channels_img=80,          # image-BEV GAP 后维度
+        #     in_channels_lidar=256,       # lidar-BEV GAP 后维度
+        #     proj_dim=256,
+        #     queue_size=16384,
+        #     temperature=0.07,
+        #     neg_k=4096,
+        #     use_all_gather=True          # 多卡训练建议开
+        # )
+
+        self.itm_pre_weight = 1.0
+
+        self.drop_p =0.15
+        self.drop_channel = DropChannel(p=self.drop_p)
 
     def _forward(self,
                  batch_inputs: Tensor,
@@ -268,18 +305,42 @@ class BEVFusion(Base3DDetector):
                                                 camera2lidar, img_aug_matrix,
                                                 lidar_aug_matrix,
                                                 batch_input_metas)
-            features.append(img_feature)
-        pts_feature = self.extract_pts_feat(batch_inputs_dict)
-        features.append(pts_feature)
+            features.append(img_feature)                        # torch.Size([bs, 80, 180, 180])
+
+        pts_feature = self.extract_pts_feat(batch_inputs_dict)  # torch.Size([bs, 256, 180, 180])
+        features.append(pts_feature)                            
+        # features[0] img : torch.Size([bs, 80, 180, 180])
+        # features[1] pts : torch.Size([bs, 256, 180, 180])
+        # 此处为得到的所有特征，这里要做一次ITM，在模态融合之前进行一次ITM
+
+
+        if self.training:  # 两个模态之间的ITM
+
+            img_feat   = self.drop_channel(features[0])  # [B, 80, H, W]
+            lidar_feat = self.drop_channel(features[1])  # [B, 256, H, W]
+
+            # 1) GAP 得到 [B, C]
+            img_vec   = torch.nn.functional.adaptive_avg_pool2d(img_feat, 1).flatten(1)  # torch.Size([2, 80])
+            lidar_vec = torch.nn.functional.adaptive_avg_pool2d(lidar_feat, 1).flatten(1)  # torch.Size([2, 256])
+            # 2) 计算 ITM 损失（内部含投影与二分类头）
+            self._loss_itm_pre = self.itm_pre_head(lidar_vec, img_vec) * self.itm_pre_weight
+            
+            # 这里用ITC
+
+        else:
+            self._loss_itm_pre = None
+
+
+
 
         if self.fusion_layer is not None:
-            x = self.fusion_layer(features)
+            x = self.fusion_layer(features)  # 输出：torch.Size([bs, 256, 180, 180]) 这里只是一个简单的线形层融合
         else:
             assert len(features) == 1, features
             x = features[0]
 
-        x = self.pts_backbone(x)
-        x = self.pts_neck(x)
+        x = self.pts_backbone(x) # 输出 ：[0] torch.Size([bs, 128, 180, 180]) [1] torch.Size([bs, 256, 90, 90])   使用的SECOND网络，和neck一起承担BEV encoder功能
+        x = self.pts_neck(x)     # 输出 ：torch.Size([bs, 512, 180, 180])   使用的SECONDFPN网络，和neck一起承担BEV encoder功能
 
         return x
 
@@ -294,5 +355,8 @@ class BEVFusion(Base3DDetector):
             bbox_loss = self.bbox_head.loss(feats, batch_data_samples)
 
         losses.update(bbox_loss)
+
+        if self._loss_itm_pre is not None:
+            losses['loss_itm_pre'] = self._loss_itm_pre
 
         return losses

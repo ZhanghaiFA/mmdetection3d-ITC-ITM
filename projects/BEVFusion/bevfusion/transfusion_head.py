@@ -742,7 +742,7 @@ class TransFusionHead(nn.Module):
             heatmap[None],
         )
 
-    def loss(self, batch_feats, batch_data_samples):
+    def loss(self, batch_feats, batch_data_samples):   # 整体网络的loss部分，这里要加ITC和ITM
         """Loss function for CenterHead.
 
         Args:
@@ -756,8 +756,8 @@ class TransFusionHead(nn.Module):
         batch_input_metas, batch_gt_instances_3d = [], []
         for data_sample in batch_data_samples:
             batch_input_metas.append(data_sample.metainfo)
-            batch_gt_instances_3d.append(data_sample.gt_instances_3d)
-        preds_dicts = self(batch_feats, batch_input_metas)
+            batch_gt_instances_3d.append(data_sample.gt_instances_3d)   # 这里读取真值
+        preds_dicts = self(batch_feats, batch_input_metas)              # 这里的输出会包含每个decoder层的预测结果
         loss = self.loss_by_feat(preds_dicts, batch_gt_instances_3d)
 
         return loss
@@ -799,13 +799,13 @@ class TransFusionHead(nn.Module):
             else:
                 prefix = f'layer_{idx_layer}'
 
-            layer_labels = labels[..., idx_layer *
+            layer_labels = labels[..., idx_layer *                              # 提取当前层的标签
                                   self.num_proposals:(idx_layer + 1) *
                                   self.num_proposals, ].reshape(-1)
-            layer_label_weights = label_weights[
+            layer_label_weights = label_weights[                                # 提取当前层的权重
                 ..., idx_layer * self.num_proposals:(idx_layer + 1) *
                 self.num_proposals, ].reshape(-1)
-            layer_score = preds_dict['heatmap'][..., idx_layer *
+            layer_score = preds_dict['heatmap'][..., idx_layer *                # 提取当前层的预测分数
                                                 self.num_proposals:(idx_layer +
                                                                     1) *
                                                 self.num_proposals, ]
