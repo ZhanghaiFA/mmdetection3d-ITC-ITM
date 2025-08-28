@@ -15,7 +15,7 @@ from mmdet3d.structures import Det3DDataSample
 from mmdet3d.utils import OptConfigType, OptMultiConfig, OptSampleList
 from .ops import Voxelization
 
-from .contrastive_utils import MatchingHead, ContrastiveHead
+from .contrastive_utils import MatchingHead, ContrastiveHead,SimpleMatchingHeadWithFocalLoss,MatchingHeadWithAllInBatchNegatives
 
 import torch.nn as nn
 
@@ -29,9 +29,78 @@ class DropChannel(nn.Module):
         # x: [B, C, H, W]
         return self.drop(x)
 
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+
+
+class DropBlock(nn.Module):
+    def __init__(self, block_size=7, drop_prob=0.1):
+        """
+        块状丢弃模块 - 将块置零但不改变特征图大小
+        Args:
+            block_size: 要丢弃的块大小
+            drop_prob: 丢弃概率
+        """
+        super().__init__()
+        self.block_size = block_size
+        self.drop_prob = drop_prob
+    
+    def forward(self, x):
+        # 训练时才应用dropout
+        if not self.training or self.drop_prob == 0:
+            return x
+        
+        # x: [B, C, H, W]
+        batch_size, channels, height, width = x.size()
+        
+        # 计算有效的块丢弃概率
+        gamma = self.drop_prob * (height * width) / (self.block_size ** 2) / \
+                ((height - self.block_size + 1) * (width - self.block_size + 1))
+        
+        # 生成伯努利mask
+        mask_shape = (batch_size, channels, 
+                     height - self.block_size + 1, 
+                     width - self.block_size + 1)
+        mask = torch.bernoulli(torch.ones(mask_shape, dtype=x.dtype, device=x.device) * gamma)
+        
+        # 使用max_pool2d扩展mask块
+        # padding必须小于等于kernel_size的一半
+        mask = F.max_pool2d(input=mask, 
+                           kernel_size=self.block_size,
+                           stride=1, 
+                           padding=self.block_size // 2)  # 这里使用整除确保padding合法
+        
+        # 确保mask和x的尺寸完全匹配
+        if mask.shape[2:] != x.shape[2:]:
+            # 如果尺寸不匹配，进行调整
+            pad_h = (height - mask.shape[2]) // 2
+            pad_w = (width - mask.shape[3]) // 2
+            if pad_h > 0 or pad_w > 0:
+                mask = F.pad(mask, (pad_w, width - mask.shape[3] - pad_w,
+                                   pad_h, height - mask.shape[2] - pad_h))
+            else:
+                # 如果mask比x大，裁剪
+                mask = mask[:, :, :height, :width]
+        
+        # 反转mask（1表示保留，0表示丢弃）
+        mask = 1 - mask
+        
+        # 应用mask
+        out = x * mask
+        
+        # 归一化
+        mask_mean = mask.mean()
+        if mask_mean > 0:
+            out = out / mask_mean
+        
+        return out
+
+
+
 
 @MODELS.register_module()
-class BEVFusion(Base3DDetector):
+class BEVFusionNoSwin(Base3DDetector):
 
     def __init__(
         self,
@@ -76,15 +145,26 @@ class BEVFusion(Base3DDetector):
 
         self.init_weights()
 
-        self.itm_pre_head = MatchingHead(
-            in_channels_img=80,      # LiDAR 全局池化后的维度
+
+####################################################ITM####################################################
+
+        # self.itm_pre_head = SimpleMatchingHeadWithFocalLoss(
+        #     in_channels_img=80,      # LiDAR 全局池化后的维度
+        #     in_channels_lidar=256,
+        #     hidden=128,
+        #     use_projector=True,
+        #     proj_dim=128
+        # )
+
+        self.itm_pre_head = MatchingHeadWithAllInBatchNegatives(
+            in_channels_img=80, 
             in_channels_lidar=256,
-            hidden=256,
-            use_projector=True,
-            proj_dim=256
+            proj_dim=256  # 投影维度可以根据需求调整
         )
 
-        # self.itc_post_head = ContrastiveHead(
+
+
+        # self.itc_post_head = ContrastiveHead(   ## ITC
         #     in_channels_img=80,          # image-BEV GAP 后维度
         #     in_channels_lidar=256,       # lidar-BEV GAP 后维度
         #     proj_dim=256,
@@ -94,12 +174,19 @@ class BEVFusion(Base3DDetector):
         #     use_all_gather=True          # 多卡训练建议开
         # )
 
-        # self.itm_pre_weight = 0.5
-
-        self.itm_pre_weight = nn.Parameter(torch.tensor(0.5))  # 非常难用
+        self.itm_pre_weight = 0.4
+        # self.itc_post_weight = 0.5
 
         self.drop_p =0.15
         self.drop_channel = DropChannel(p=self.drop_p)
+
+        self.drop_block_p = 0.10  # 块状丢弃的概率，可以从配置文件传入
+        self.block_size = 7      # 块的大小，可以从配置文件传入
+        self.drop_block = DropBlock(drop_prob=self.drop_block_p, block_size=self.block_size)
+
+        
+####################################################ITM####################################################
+
 
     def _forward(self,
                  batch_inputs: Tensor,
@@ -177,11 +264,11 @@ class BEVFusion(Base3DDetector):
         lidar_aug_matrix,
         img_metas,
     ) -> torch.Tensor:
-        B, N, C, H, W = x.size()
+        B, N, C, H, W = x.size()    # 4 6 3 256 704
         x = x.view(B * N, C, H, W).contiguous()
 
-        x = self.img_backbone(x)
-        x = self.img_neck(x)
+        # x = self.img_backbone(x)
+        # x = self.img_neck(x)
 
         if not isinstance(x, torch.Tensor):
             x = x[0]
@@ -313,24 +400,32 @@ class BEVFusion(Base3DDetector):
         features.append(pts_feature)                            
         # features[0] img : torch.Size([bs, 80, 180, 180])
         # features[1] pts : torch.Size([bs, 256, 180, 180])
-        # 此处为得到的所有特征，这里要做一次ITM，在模态融合之前进行一次ITM
+        # 此处为得到的所有特征，这里要做一次ITM，
 
+####################################################ITM####################################################
 
         if self.training:  # 两个模态之间的ITM
+            img_feat   = features[0]
+            lidar_feat = features[1]
 
-            img_feat   = self.drop_channel(features[0])  # [B, 80, H, W]
-            lidar_feat = self.drop_channel(features[1])  # [B, 256, H, W]
+            img_feat = self.drop_block(img_feat)
+            lidar_feat = self.drop_block(lidar_feat)
+
+            img_feat   = self.drop_channel(img_feat)  # [B, 80, H, W]
+            lidar_feat = self.drop_channel(lidar_feat)  # [B, 256, H, W]
 
             # 1) GAP 得到 [B, C]
             img_vec   = torch.nn.functional.adaptive_avg_pool2d(img_feat, 1).flatten(1)  # torch.Size([2, 80])
             lidar_vec = torch.nn.functional.adaptive_avg_pool2d(lidar_feat, 1).flatten(1)  # torch.Size([2, 256])
             # 2) 计算 ITM 损失（内部含投影与二分类头）
             self._loss_itm_pre = self.itm_pre_head(lidar_vec, img_vec) * self.itm_pre_weight
-            
-            # 这里用ITC
 
+            # self._loss_itc_post = self.itc_post_head(lidar_vec, img_vec) * self.itc_post_weight    # 无法使用
+            
         else:
             self._loss_itm_pre = None
+
+####################################################ITM####################################################
 
 
 
@@ -343,6 +438,8 @@ class BEVFusion(Base3DDetector):
 
         x = self.pts_backbone(x) # 输出 ：[0] torch.Size([bs, 128, 180, 180]) [1] torch.Size([bs, 256, 90, 90])   使用的SECOND网络，和neck一起承担BEV encoder功能
         x = self.pts_neck(x)     # 输出 ：torch.Size([bs, 512, 180, 180])   使用的SECONDFPN网络，和neck一起承担BEV encoder功能
+
+
 
         return x
 
@@ -358,7 +455,16 @@ class BEVFusion(Base3DDetector):
 
         losses.update(bbox_loss)
 
+####################################################ITM####################################################
+
         if self._loss_itm_pre is not None:
             losses['loss_itm_pre'] = self._loss_itm_pre
+
+        # if self._loss_itc_post is not None:
+        #     losses['loss_itc_post'] = self._loss_itc_post 
+
+
+####################################################ITM####################################################
+
 
         return losses

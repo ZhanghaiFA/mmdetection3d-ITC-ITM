@@ -6,7 +6,8 @@ from torch import nn
 
 from mmdet3d.registry import MODELS
 from .ops import bev_pool
-
+from .only_depth_neck3_simpleone import LSSNeck as SparseAwareNeck
+from .mobile_ViT_Pconv_pro import Model
 
 def gen_dx_bx(xbound, ybound, zbound):
     dx = torch.Tensor([row[2] for row in [xbound, ybound, zbound]])
@@ -419,6 +420,160 @@ class DepthLSSTransform(BaseDepthTransform):
         x = x.view(B, N, self.C, self.D, fH, fW)
         x = x.permute(0, 1, 3, 4, 5, 2)
         return x
+
+    def forward(self, *args, **kwargs):
+        x = super().forward(*args, **kwargs)
+        x = self.downsample(x)
+        return x
+
+
+
+class Args:
+    def __init__(self):
+        self.bc = 4
+        self.prob = 0.5
+        self.dkn_residual = False
+        self.kernel_size = 3
+        self.depth_norm = False
+
+
+
+
+@MODELS.register_module()
+class DepthLSSTransform_v2(BaseDepthTransform):
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        image_size: Tuple[int, int],
+        feature_size: Tuple[int, int],
+        xbound: Tuple[float, float, float],
+        ybound: Tuple[float, float, float],
+        zbound: Tuple[float, float, float],
+        dbound: Tuple[float, float, float],
+        downsample: int = 1,
+    ) -> None:
+        """Compared with `LSSTransform`, `DepthLSSTransform` adds sparse depth
+        information from lidar points into the inputs of the `depthnet`."""
+        super().__init__(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            image_size=image_size,
+            feature_size=feature_size,
+            xbound=xbound,
+            ybound=ybound,
+            zbound=zbound,
+            dbound=dbound,
+        )
+        # self.dtransform = nn.Sequential(
+        #     nn.Conv2d(1, 8, 1),
+        #     nn.BatchNorm2d(8),
+        #     nn.ReLU(True),
+        #     nn.Conv2d(8, 32, 5, stride=4, padding=2),
+        #     nn.BatchNorm2d(32),
+        #     nn.ReLU(True),
+        #     nn.Conv2d(32, 64, 5, stride=2, padding=2),
+        #     nn.BatchNorm2d(64),
+        #     nn.ReLU(True),
+        # )
+        
+        args = Args()
+        self.Guide_ViT = Model(args) 
+
+        self.pretrain_path = '/home/zhf/mmdetection3d/pretrain/mobile-ViT.pt'
+        checkpoint_ = torch.load(self.pretrain_path, map_location='cuda')
+        state_dict = checkpoint_['net']
+        key_m, key_u = self.Guide_ViT.load_state_dict(state_dict, strict=False)
+
+        self.neck = SparseAwareNeck()
+
+        # self.depthnet = nn.Sequential(
+        #     nn.Conv2d(in_channels + 64, in_channels, 3, padding=1),
+        #     nn.BatchNorm2d(in_channels),
+        #     nn.ReLU(True),
+        #     nn.Conv2d(in_channels, in_channels, 3, padding=1),
+        #     nn.BatchNorm2d(in_channels),
+        #     nn.ReLU(True),
+        #     nn.Conv2d(in_channels, self.D + self.C, 1),
+        # )
+
+
+
+
+        if downsample > 1:
+            assert downsample == 2, downsample
+            self.downsample = nn.Sequential(
+                nn.Conv2d(
+                    out_channels, out_channels, 3, padding=1, bias=False),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(True),
+                nn.Conv2d(
+                    out_channels,
+                    out_channels,
+                    3,
+                    stride=downsample,
+                    padding=1,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(True),
+                nn.Conv2d(
+                    out_channels, out_channels, 3, padding=1, bias=False),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(True),
+            )
+        else:
+            self.downsample = nn.Identity()
+
+    def get_cam_feats(self, x, d):
+        
+        # d = d[..., :896, :]  # d.shape: [B, N, 1, 896, 1600]
+        # x = x[..., :896, :]  # x.shape: [B, N, C, 896, 1600]
+        # 去掉四行，让他变成8的倍数
+        # 最新输入大小 ：torch.Size([1, 6, 1, 256, 704])  torch.Size([1, 6, 3, 256, 704])
+        B, N, C, fH, fW = x.shape  # 获取特征图大小
+
+        d = d.view(B * N, *d.shape[2:])  # d:    torch.Size([bs, 6, 1, 896, 1600]) >>>> torch.Size([bs* 6, 1, 896, 1600])   
+        
+        x = x.view(B * N, C, fH, fW)     # x:    torch.Size([bs, 6, 3, 896, 1600]) >>>> torch.Size([bs* 6, 3, 896, 1600])  
+        
+        # torch.cuda.synchronize()
+        # start_time = time.perf_counter()
+
+        x,mask = self.Guide_ViT(x,d)  # 传入图像特征和深度特征，输出融合后的特征
+
+        x = self.neck(x)
+
+        # torch.cuda.synchronize()
+        # elapsed = time.perf_counter() - start_time
+        # print(f"[Timing] my backbone and neck: {elapsed * 1000:.2f} ms")
+
+        # 3) 分割出概率通道 & 特征通道
+        depth_prob = x[:, : self.D]  # [B*N,118,fH,fW]
+        feat       = x[:, self.D:]   # [B*N,80, fH,fW]
+
+        # 4) 对概率通道做 softmax
+        depth_prob = depth_prob.softmax(dim=1)  # [B*N,118,fH,fW]
+
+        # 5) 做逐元素相乘
+        #    depth_prob.unsqueeze(1): [B*N, 1,   118, fH, fW]
+        #    feat.unsqueeze(2):       [B*N, 80,  1,   fH, fW]
+        #    => out: [B*N,80,118,fH,fW]
+        out = depth_prob.unsqueeze(1) * feat.unsqueeze(2)
+
+        # 6) reshape 回 [B, N, ...]
+        #    原先你合并了 B,N => B*N; 现在拆回来:
+        #    out.shape = [B*N,80,118,fH,fW]
+        #    => view(B,N,80,118,fH,fW)
+        out = out.view(B, N, self.C, self.D, feat.shape[2], feat.shape[3])
+        # 形状: [B, N, 80, 118, fH, fW]
+
+        # 7) permute 到 [B, N, 118, fH, fW, 80]
+        out = out.permute(0, 1, 3, 4, 5, 2)
+        # 结果: [B, N, 118, fH, fW, 80]
+
+        return out
 
     def forward(self, *args, **kwargs):
         x = super().forward(*args, **kwargs)

@@ -266,28 +266,50 @@ test_pipeline = [
         ])
 ]
 
+# 使用CBGSDataset 需要修改下一个文件的对应部分
+# train_dataloader = dict(
+#     batch_size=4,
+#     num_workers=1,
+#     # batch_size=4,
+#     # num_workers=1,
+#     persistent_workers=True,
+#     sampler=dict(type='DefaultSampler', shuffle=False),
+#     dataset=dict(
+#         type='CBGSDataset',
+#         dataset=dict(
+#             type=dataset_type,
+#             data_root=data_root,
+#             ann_file='nuscenes_infos_train.pkl',
+#             pipeline=train_pipeline,
+#             metainfo=metainfo,
+#             modality=input_modality,
+#             test_mode=False,
+#             data_prefix=data_prefix,
+#             use_valid_flag=True,
+#             # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
+#             # and box_type_3d='Depth' in sunrgbd and scannet dataset.
+#             box_type_3d='LiDAR')))
+
 train_dataloader = dict(
-    batch_size=6,
-    num_workers=16,
-    # batch_size=4,
-    # num_workers=1,
+    batch_size=1,   # 8
+    num_workers=1,  # 16    
     persistent_workers=True,
-    sampler=dict(type='DefaultSampler', shuffle=True),
+    sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=dict(
-        type='CBGSDataset',
-        dataset=dict(
-            type=dataset_type,
-            data_root=data_root,
-            ann_file='nuscenes_infos_train.pkl',
-            pipeline=train_pipeline,
-            metainfo=metainfo,
-            modality=input_modality,
-            test_mode=False,
-            data_prefix=data_prefix,
-            use_valid_flag=True,
-            # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
-            # and box_type_3d='Depth' in sunrgbd and scannet dataset.
-            box_type_3d='LiDAR')))
+        type=dataset_type,  # 直接使用 NuScenesDataset
+        data_root=data_root,
+        ann_file='nuscenes_infos_train.pkl',
+        pipeline=train_pipeline,
+        metainfo=metainfo,
+        modality=input_modality,
+        test_mode=False,
+        data_prefix=data_prefix,
+        use_valid_flag=True,
+        box_type_3d='LiDAR',
+        backend_args=backend_args
+    )
+)
+
 val_dataloader = dict(
     batch_size=1,
     num_workers=4,

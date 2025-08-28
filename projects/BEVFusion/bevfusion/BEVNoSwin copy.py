@@ -31,7 +31,7 @@ class DropChannel(nn.Module):
 
 
 @MODELS.register_module()
-class BEVFusion(Base3DDetector):
+class BEVFusionNoSwin(Base3DDetector):
 
     def __init__(
         self,
@@ -76,6 +76,9 @@ class BEVFusion(Base3DDetector):
 
         self.init_weights()
 
+
+####################################################ITM####################################################
+
         self.itm_pre_head = MatchingHead(
             in_channels_img=80,      # LiDAR 全局池化后的维度
             in_channels_lidar=256,
@@ -84,7 +87,7 @@ class BEVFusion(Base3DDetector):
             proj_dim=256
         )
 
-        # self.itc_post_head = ContrastiveHead(
+        # self.itc_post_head = ContrastiveHead(   ## ITC
         #     in_channels_img=80,          # image-BEV GAP 后维度
         #     in_channels_lidar=256,       # lidar-BEV GAP 后维度
         #     proj_dim=256,
@@ -94,12 +97,14 @@ class BEVFusion(Base3DDetector):
         #     use_all_gather=True          # 多卡训练建议开
         # )
 
-        # self.itm_pre_weight = 0.5
-
-        self.itm_pre_weight = nn.Parameter(torch.tensor(0.5))  # 非常难用
+        self.itm_pre_weight = 0.2
+        # self.itc_post_weight = 0.5
 
         self.drop_p =0.15
         self.drop_channel = DropChannel(p=self.drop_p)
+
+####################################################ITM####################################################
+
 
     def _forward(self,
                  batch_inputs: Tensor,
@@ -180,8 +185,8 @@ class BEVFusion(Base3DDetector):
         B, N, C, H, W = x.size()
         x = x.view(B * N, C, H, W).contiguous()
 
-        x = self.img_backbone(x)
-        x = self.img_neck(x)
+        # x = self.img_backbone(x)
+        # x = self.img_neck(x)
 
         if not isinstance(x, torch.Tensor):
             x = x[0]
@@ -315,6 +320,7 @@ class BEVFusion(Base3DDetector):
         # features[1] pts : torch.Size([bs, 256, 180, 180])
         # 此处为得到的所有特征，这里要做一次ITM，在模态融合之前进行一次ITM
 
+####################################################ITM####################################################
 
         if self.training:  # 两个模态之间的ITM
 
@@ -326,11 +332,12 @@ class BEVFusion(Base3DDetector):
             lidar_vec = torch.nn.functional.adaptive_avg_pool2d(lidar_feat, 1).flatten(1)  # torch.Size([2, 256])
             # 2) 计算 ITM 损失（内部含投影与二分类头）
             self._loss_itm_pre = self.itm_pre_head(lidar_vec, img_vec) * self.itm_pre_weight
-            
-            # 这里用ITC
 
+            # self._loss_itc_post = self.itc_post_head(lidar_vec, img_vec) * self.itc_post_weight    # 无法使用
+            
         else:
             self._loss_itm_pre = None
+####################################################ITM####################################################
 
 
 
@@ -358,7 +365,16 @@ class BEVFusion(Base3DDetector):
 
         losses.update(bbox_loss)
 
+####################################################ITM####################################################
+
         if self._loss_itm_pre is not None:
             losses['loss_itm_pre'] = self._loss_itm_pre
+
+        # if self._loss_itc_post is not None:
+        #     losses['loss_itc_post'] = self._loss_itc_post 
+
+
+####################################################ITM####################################################
+
 
         return losses

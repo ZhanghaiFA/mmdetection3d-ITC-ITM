@@ -11,6 +11,7 @@ from .utils import (BBoxBEVL1Cost, HeuristicAssigner3D, HungarianAssigner3D,
                     IoU3DCost)
 
 from .contrastive_utils import FeatureQueue, ContrastiveHead, MatchingHead
+from .BEVNoSwin    import BEVFusionNoSwin
 
 __all__ = [
     'BEVFusion', 'TransFusionHead', 'ConvFuser', 'ImageAug3D', 'GridMask',
@@ -18,5 +19,5 @@ __all__ = [
     'HeuristicAssigner3D', 'DepthLSSTransform', 'LSSTransform',
     'BEVLoadMultiViewImageFromFiles', 'BEVFusionSparseEncoder',
     'TransformerDecoderLayer', 'BEVFusionRandomFlip3D',
-    'BEVFusionGlobalRotScaleTrans','FeatureQueue', 'ContrastiveHead', 'MatchingHead'
+    'BEVFusionGlobalRotScaleTrans','FeatureQueue', 'ContrastiveHead', 'MatchingHead','BEVFusionNoSwin'
 ]
